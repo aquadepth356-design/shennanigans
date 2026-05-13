@@ -23,16 +23,13 @@ inline std::vector<BoneVertex> ExtractBonePositions(
         BoneVertex v;
         v.name     = boneNames[i];
         v.index    = (int)i;
-        v.worldPos = glm::vec3(
-            boneMatrices[i][0][3],
-            boneMatrices[i][1][3],
-            boneMatrices[i][2][3]);
+        // Position is stored in the translation column: mat[3] = (x, y, z, 1)
+        v.worldPos = glm::vec3(boneMatrices[i][3]);
         verts.push_back(v);
     }
     return verts;
 }
 
-// Read ALL bones, store each with its raw index for identification
 inline std::vector<BoneVertex> ExtractAllBonePositions(
     const std::vector<glm::mat4>& boneMatrices)
 {
@@ -42,10 +39,8 @@ inline std::vector<BoneVertex> ExtractAllBonePositions(
         BoneVertex v;
         v.name     = std::to_string(i);
         v.index    = (int)i;
-        v.worldPos = glm::vec3(
-            boneMatrices[i][0][3],
-            boneMatrices[i][1][3],
-            boneMatrices[i][2][3]);
+        // Position is stored in the translation column: mat[3] = (x, y, z, 1)
+        v.worldPos = glm::vec3(boneMatrices[i][3]);
         verts.push_back(v);
     }
     return verts;
