@@ -63,15 +63,19 @@ public:
 
     // Read CS2 bone matrices - 3x4 row-major (48 bytes each).
     // Converts to glm::mat4 so translation = mat[0][3], mat[1][3], mat[2][3]
+    // FIX: Accept partial reads - ReadProcessMemory returns FALSE with ERROR_PARTIAL_COPY
+    // when the read spans a page boundary, but bytesRead will still be > 0.
     std::vector<glm::mat4> readBoneMatrices(uintptr_t address, size_t count) const {
         if (!address) return {};
 
         std::vector<BoneMatrix3x4> raw(count);
         SIZE_T bytesRead = 0;
-        BOOL ok = ReadProcessMemory(m_handle,
+        ReadProcessMemory(m_handle,
             reinterpret_cast<LPCVOID>(address),
             raw.data(), sizeof(BoneMatrix3x4) * count, &bytesRead);
-        if (!ok || bytesRead == 0) return {};
+
+        // FIX: Only bail if ZERO bytes came back - partial reads are fine and expected
+        if (bytesRead == 0) return {};
 
         size_t gotBones = bytesRead / sizeof(BoneMatrix3x4);
         std::vector<glm::mat4> matrices(gotBones);

@@ -13,6 +13,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include "CS2Offsets.hpp"
 #include "Overlay.hpp"
@@ -57,17 +58,22 @@ static std::vector<PlayerData> ReadPlayers(
     int checked = 0, dead = 0, teamSkip = 0, boneFail = 0;
     int shownAlive = 0;
 
-    for (int i = 1; i <= 20000; ++i) {
+    // FIX: Cap at 1024 - CS2 has at most 64 player pawns.
+    // Scanning 20000 slots = ~1.2M RPM calls/sec which tanks perf and raises detection risk.
+    for (int i = 1; i <= 1024; ++i) {
         uintptr_t ptr = GetEntityPtr(reader, gs, i);
         if (!ptr || ptr == localPawn) continue;
         checked++;
 
         int health = reader.readAbsolute<int32_t>(ptr + CS2::OFFSET_HEALTH);
-        int team   = reader.readAbsolute<uint8_t>(ptr + CS2::OFFSET_TEAM);
+
+        // FIX: Read team as int32_t - m_iTeamNum is a 32-bit int in Source 2.
+        // Previously read as uint8_t which could return garbage if offset was misaligned.
+        int team = reader.readAbsolute<int32_t>(ptr + CS2::OFFSET_TEAM);
 
         if (health < 1 || health > 100) { dead++; continue; }
 
-        // Show first 5 alive entities so we can see what teams they report
+        // Show first 5 alive entities for debug
         if (shownAlive < 5) {
             DBG(IM_COL32(200,200,255,255), "alive idx:%d hp:%d team:%d", i, health, team);
             shownAlive++;
@@ -174,10 +180,15 @@ static void RenderFrame(ProcessMemoryReader& reader, float screenW, float screen
     g_dl = ImGui::GetBackgroundDrawList();
 
     try {
-        glm::mat4 viewProj  = reader.readClient<glm::mat4>(CS2::dwViewMatrix);
+        // FIX: CS2's dwViewMatrix is stored row-major in memory.
+        // GLM reads it as column-major so we must transpose to get the correct matrix.
+        glm::mat4 viewProj  = glm::transpose(reader.readClient<glm::mat4>(CS2::dwViewMatrix));
+
         uintptr_t localPawn = reader.readClient<uintptr_t>(CS2::dwLocalPlayerPawn);
+
+        // FIX: Read local team as int32_t to match OFFSET_TEAM fix
         int localTeam = localPawn
-            ? reader.readAbsolute<uint8_t>(localPawn + CS2::OFFSET_TEAM) : 0;
+            ? reader.readAbsolute<int32_t>(localPawn + CS2::OFFSET_TEAM) : 0;
 
         g_dl->AddText({ 10.f, 10.f }, IM_COL32(0,255,0,255), "CS2 Overlay Active");
         g_dl->AddText({ 10.f, 26.f }, IM_COL32(200,200,200,255),

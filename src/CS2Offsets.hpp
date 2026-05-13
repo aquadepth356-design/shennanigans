@@ -12,7 +12,9 @@ namespace CS2 {
 
     // C_BaseEntity (client_dll.hpp 2026-05-07 dump)
     constexpr uintptr_t OFFSET_HEALTH          = 0x34C;  // m_iHealth        int32
-    constexpr uintptr_t OFFSET_TEAM            = 0x3EB;  // m_iTeamNum       uint8
+    // FIX: 0x3E8 is the correct 4-byte-aligned offset for m_iTeamNum (int32)
+    // 0x3EB was misaligned by 3 bytes causing incorrect team reads
+    constexpr uintptr_t OFFSET_TEAM            = 0x3E8;  // m_iTeamNum       int32
     constexpr uintptr_t OFFSET_GAME_SCENE_NODE = 0x330;  // m_pGameSceneNode CGameSceneNode*
 
     // CSkeletonInstance (parent: CGameSceneNode)
