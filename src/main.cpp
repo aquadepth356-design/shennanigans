@@ -22,6 +22,7 @@
 
 struct PlayerData {
     bool alive = false; int team = 0; int health = 0;
+    uintptr_t bonePtr = 0;
     std::vector<BoneVertex> bones;
     std::unordered_map<std::string, int> boneIndex;
 };
@@ -32,16 +33,14 @@ static uintptr_t GetEntityPtr(const ProcessMemoryReader& r, uintptr_t gs, int in
     return r.readAbsolute<uintptr_t>(chunkPtr + 0x78 * (index & 0x1FF) + 0x70);
 }
 
-static float       g_dbgY = 60.f;
+static float       g_dbgY = 10.f;
 static ImDrawList* g_dl   = nullptr;
 static void DBG(ImU32 col, const char* fmt, ...) {
-    char buf[160];
+    char buf[256];
     va_list a; va_start(a, fmt); vsnprintf(buf, sizeof(buf), fmt, a); va_end(a);
     g_dl->AddText({ 10.f, g_dbgY }, col, buf);
     g_dbgY += 14.f;
 }
-
-static bool s_boneLogged = false;
 
 static std::vector<PlayerData> ReadPlayers(
     const ProcessMemoryReader& reader,
@@ -49,13 +48,11 @@ static std::vector<PlayerData> ReadPlayers(
     const glm::mat4& viewProj, float screenW, float screenH)
 {
     std::vector<PlayerData> players;
-    g_dbgY = 60.f;
 
     uintptr_t gs = reader.readClient<uintptr_t>(CS2::dwEntityList);
     if (!gs) { DBG(IM_COL32(255,80,80,255), "gs null!"); return players; }
 
     int checked = 0, dead = 0, boneFail = 0;
-    int shownAlive = 0;
 
     for (int i = 1; i <= 1024; ++i) {
         uintptr_t ptr = GetEntityPtr(reader, gs, i);
@@ -67,57 +64,12 @@ static std::vector<PlayerData> ReadPlayers(
 
         if (health < 1 || health > 100) { dead++; continue; }
 
-        // Show first 5 alive entities for debug
-        if (shownAlive < 5) {
-            DBG(IM_COL32(200,200,255,255), "idx:%d hp:%d t:%d", i, health, team);
-            shownAlive++;
-        }
-
-        // NOTE: Team filtering temporarily disabled - OFFSET_TEAM needs re-verification
-        // All alive entities (hp 1-100) that are not localPawn are rendered
-
         uintptr_t sn = reader.readAbsolute<uintptr_t>(ptr + CS2::OFFSET_GAME_SCENE_NODE);
         if (!sn) { boneFail++; continue; }
 
         uintptr_t bonePtr = reader.readAbsolute<uintptr_t>(
             sn + CS2::OFFSET_MODEL_STATE + CS2::OFFSET_BONE_MATRIX_PTR);
         if (!bonePtr) { boneFail++; continue; }
-
-        // Dump raw bone float data once
-        if (!s_boneLogged) {
-            s_boneLogged = true;
-            FILE* f = fopen("cs2_bonedata.txt", "w");
-            if (f) {
-                fprintf(f, "bonePtr: 0x%llX\n\n", bonePtr);
-                uint8_t raw[480] = {};
-                reader.readRaw(bonePtr, raw, sizeof(raw));
-                fprintf(f, "=== 3x4 stride (48 bytes per bone) ===\n");
-                for (int b = 0; b < 10; ++b) {
-                    float* fl = reinterpret_cast<float*>(raw + b * 48);
-                    fprintf(f, "Bone[%d] (+0x%X):\n", b, b * 48);
-                    fprintf(f, "  floats: ");
-                    for (int k = 0; k < 12; ++k)
-                        fprintf(f, "%.3f ", fl[k]);
-                    fprintf(f, "\n");
-                    fprintf(f, "  tx=fl[3]:%.3f  ty=fl[7]:%.3f  tz=fl[11]:%.3f\n\n",
-                        fl[3], fl[7], fl[11]);
-                }
-                fprintf(f, "\n=== 4x4 stride (64 bytes per bone) ===\n");
-                uint8_t raw2[640] = {};
-                reader.readRaw(bonePtr, raw2, sizeof(raw2));
-                for (int b = 0; b < 10; ++b) {
-                    float* fl = reinterpret_cast<float*>(raw2 + b * 64);
-                    fprintf(f, "Bone[%d] (+0x%X):\n", b, b * 64);
-                    fprintf(f, "  floats: ");
-                    for (int k = 0; k < 16; ++k)
-                        fprintf(f, "%.3f ", fl[k]);
-                    fprintf(f, "\n");
-                    fprintf(f, "  fl[12]:%.3f fl[13]:%.3f fl[14]:%.3f\n\n",
-                        fl[12], fl[13], fl[14]);
-                }
-                fclose(f);
-            }
-        }
 
         auto matrices = reader.readBoneMatrices(bonePtr, CS2::BONE_COUNT);
         if (matrices.empty()) { boneFail++; continue; }
@@ -126,6 +78,7 @@ static std::vector<PlayerData> ReadPlayers(
         pd.health    = health;
         pd.team      = team;
         pd.alive     = true;
+        pd.bonePtr   = bonePtr;
         pd.bones     = ExtractAllBonePositions(matrices);
         pd.boneIndex = BuildBoneIndex(CS2_BONE_NAMES);
         ProjectBones(pd.bones, viewProj, screenW, screenH);
@@ -134,7 +87,6 @@ static std::vector<PlayerData> ReadPlayers(
 
     DBG(IM_COL32(255,165,0,255), "chk:%d dead:%d bone:%d found:%d",
         checked, dead, boneFail, (int)players.size());
-    DBG(IM_COL32(100,255,100,255), s_boneLogged ? "BONE LOGGED" : "waiting...");
 
     return players;
 }
@@ -168,67 +120,53 @@ static void RenderFrame(ProcessMemoryReader& reader, float screenW, float screen
     ImGui::NewFrame();
 
     g_dl = ImGui::GetBackgroundDrawList();
+    g_dbgY = 10.f;
 
     try {
-        // CS2 view matrix is row-major in memory, GLM is column-major - must transpose
         glm::mat4 viewProj = glm::transpose(reader.readClient<glm::mat4>(CS2::dwViewMatrix));
-
         uintptr_t localPawn = reader.readClient<uintptr_t>(CS2::dwLocalPlayerPawn);
 
-        g_dl->AddText({ 10.f, 10.f }, IM_COL32(0,255,0,255), "CS2 Overlay Active");
+        DBG(IM_COL32(0,255,0,255), "CS2 Overlay Active");
 
         auto players = ReadPlayers(reader, localPawn, viewProj, screenW, screenH);
-
-        g_dl->AddText({ 10.f, 44.f }, IM_COL32(200,200,200,255),
-            ("Enemies: " + std::to_string(players.size())).c_str());
+        DBG(IM_COL32(200,200,200,255), "Enemies: %d", (int)players.size());
 
         for (const auto& player : players) {
-            int onScreen = 0;
+            // --- BONE DIAGNOSTIC ---
+            DBG(IM_COL32(255,255,0,255), "bonePtr: 0x%llX", player.bonePtr);
+            for (int b = 0; b < 5 && b < (int)player.bones.size(); ++b) {
+                const auto& wp = player.bones[b].worldPos;
+                DBG(IM_COL32(180,255,255,255), "b%d: %.1f %.1f %.1f", b, wp.x, wp.y, wp.z);
+            }
+            // Detect if all bones landed on same position (bad pointer sign)
+            bool allSame = true;
+            if (player.bones.size() > 1) {
+                const auto& ref = player.bones[0].worldPos;
+                for (int b = 1; b < (int)player.bones.size(); ++b) {
+                    if (glm::length(player.bones[b].worldPos - ref) > 0.1f) {
+                        allSame = false; break;
+                    }
+                }
+            }
+            DBG(allSame ? IM_COL32(255,50,50,255) : IM_COL32(50,255,50,255),
+                allSame ? "!! ALL BONES SAME POS - BAD POINTER" : "Bones look valid");
 
-            // Draw all bone dots
+            // Draw bones and bounding box
+            int onScreen = 0;
             for (const auto& bone : player.bones) {
                 if (!bone.screenPos.has_value()) continue;
                 float bx = bone.screenPos->x;
                 float by = bone.screenPos->y;
                 if (bx < 0 || bx > screenW || by < 0 || by > screenH) continue;
                 onScreen++;
-                // Larger dots (6px) so they are clearly visible
-                g_dl->AddCircleFilled({ bx, by }, 6.f, IM_COL32(255, 255, 0, 255));
+                g_dl->AddCircleFilled({ bx, by }, 4.f, IM_COL32(255,255,0,200));
             }
-
-            // Draw skeleton lines
-            DrawStickFigureOverlay(player.bones, player.boneIndex);
-
-            // Draw bounding box around all on-screen bones
-            DrawSkeletonBoundingBox(player.bones,
-                IM_COL32(255, 50, 50, 220), 2.0f);
-
-            // Draw hp label above bounding box using head bone (index 6)
-            // Fall back to first on-screen bone if head not available
-            std::optional<glm::vec2> labelPos;
-            if (player.boneIndex.count("head")) {
-                int hi = player.boneIndex.at("head");
-                if (hi < (int)player.bones.size() && player.bones[hi].screenPos.has_value())
-                    labelPos = player.bones[hi].screenPos;
-            }
-            if (!labelPos) {
-                for (const auto& bone : player.bones) {
-                    if (bone.screenPos.has_value()) { labelPos = bone.screenPos; break; }
-                }
-            }
-            if (labelPos) {
-                g_dl->AddText(
-                    { labelPos->x - 10.f, labelPos->y - 20.f },
-                    IM_COL32(255, 100, 100, 255),
-                    (std::to_string(player.health) + "hp").c_str());
-            }
-
+            DrawSkeletonBoundingBox(player.bones, IM_COL32(255,50,50,220), 2.0f);
             DBG(IM_COL32(180,255,180,255), "hp:%d bones_on:%d", player.health, onScreen);
         }
 
     } catch (const std::exception& e) {
-        g_dl->AddText({ 10.f, 10.f }, IM_COL32(255,50,50,255),
-            (std::string("[ERR] ") + e.what()).c_str());
+        DBG(IM_COL32(255,50,50,255), "[ERR] %s", e.what());
     }
 
     ImGui::Render();
