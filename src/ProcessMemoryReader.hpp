@@ -6,10 +6,14 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-// CS2 bone matrices are 3x4 row-major (48 bytes each), NOT 4x4 (64 bytes).
-struct BoneMatrix3x4 {
-    float m[3][4];
+// CS2 bone data is 32 bytes per bone:
+//   float x, y, z, w;       // world position (w = 1.0)
+//   float qx, qy, qz, qw;   // rotation quaternion
+struct BoneData {
+    float x, y, z, w;
+    float qx, qy, qz, qw;
 };
+static_assert(sizeof(BoneData) == 32, "BoneData must be 32 bytes");
 
 class ProcessMemoryReader {
 public:
@@ -57,35 +61,26 @@ public:
         return readAbsolute<T>(m_clientBase + offset);
     }
 
-    glm::mat4 readMatrix4x4(uintptr_t address) const {
-        return readAbsolute<glm::mat4>(address);
-    }
-
-    // Read CS2 bone matrices - 3x4 row-major (48 bytes each).
-    // Converts to glm::mat4 so translation = mat[0][3], mat[1][3], mat[2][3]
-    // FIX: Accept partial reads - ReadProcessMemory returns FALSE with ERROR_PARTIAL_COPY
-    // when the read spans a page boundary, but bytesRead will still be > 0.
+    // Read CS2 bone data - 32 bytes per bone: [x,y,z,1.0, qx,qy,qz,qw]
+    // Stores world position in mat[3] column so mat[3][0..2] = x,y,z
     std::vector<glm::mat4> readBoneMatrices(uintptr_t address, size_t count) const {
         if (!address) return {};
 
-        std::vector<BoneMatrix3x4> raw(count);
+        std::vector<BoneData> raw(count);
         SIZE_T bytesRead = 0;
         ReadProcessMemory(m_handle,
             reinterpret_cast<LPCVOID>(address),
-            raw.data(), sizeof(BoneMatrix3x4) * count, &bytesRead);
+            raw.data(), sizeof(BoneData) * count, &bytesRead);
 
-        // FIX: Only bail if ZERO bytes came back - partial reads are fine and expected
         if (bytesRead == 0) return {};
 
-        size_t gotBones = bytesRead / sizeof(BoneMatrix3x4);
+        size_t gotBones = bytesRead / sizeof(BoneData);
         std::vector<glm::mat4> matrices(gotBones);
 
         for (size_t i = 0; i < gotBones; ++i) {
-            const auto& r = raw[i];
-            matrices[i][0] = glm::vec4(r.m[0][0], r.m[0][1], r.m[0][2], r.m[0][3]);
-            matrices[i][1] = glm::vec4(r.m[1][0], r.m[1][1], r.m[1][2], r.m[1][3]);
-            matrices[i][2] = glm::vec4(r.m[2][0], r.m[2][1], r.m[2][2], r.m[2][3]);
-            matrices[i][3] = glm::vec4(0.f, 0.f, 0.f, 1.f);
+            matrices[i] = glm::mat4(1.f);
+            // Store world position in the translation column
+            matrices[i][3] = glm::vec4(raw[i].x, raw[i].y, raw[i].z, 1.f);
         }
         return matrices;
     }
