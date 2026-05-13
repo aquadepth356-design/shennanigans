@@ -13,7 +13,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/matrix_inverse.hpp>
 
 #include "CS2Offsets.hpp"
 #include "Overlay.hpp"
@@ -46,7 +45,7 @@ static bool s_boneLogged = false;
 
 static std::vector<PlayerData> ReadPlayers(
     const ProcessMemoryReader& reader,
-    uintptr_t localPawn, int localTeam,
+    uintptr_t localPawn,
     const glm::mat4& viewProj, float screenW, float screenH)
 {
     std::vector<PlayerData> players;
@@ -55,32 +54,27 @@ static std::vector<PlayerData> ReadPlayers(
     uintptr_t gs = reader.readClient<uintptr_t>(CS2::dwEntityList);
     if (!gs) { DBG(IM_COL32(255,80,80,255), "gs null!"); return players; }
 
-    int checked = 0, dead = 0, teamSkip = 0, boneFail = 0;
+    int checked = 0, dead = 0, boneFail = 0;
     int shownAlive = 0;
 
-    // FIX: Cap at 1024 - CS2 has at most 64 player pawns.
-    // Scanning 20000 slots = ~1.2M RPM calls/sec which tanks perf and raises detection risk.
     for (int i = 1; i <= 1024; ++i) {
         uintptr_t ptr = GetEntityPtr(reader, gs, i);
         if (!ptr || ptr == localPawn) continue;
         checked++;
 
         int health = reader.readAbsolute<int32_t>(ptr + CS2::OFFSET_HEALTH);
-
-        // FIX: Read team as int32_t - m_iTeamNum is a 32-bit int in Source 2.
-        // Previously read as uint8_t which could return garbage if offset was misaligned.
-        int team = reader.readAbsolute<int32_t>(ptr + CS2::OFFSET_TEAM);
+        int team   = reader.readAbsolute<int32_t>(ptr + CS2::OFFSET_TEAM);
 
         if (health < 1 || health > 100) { dead++; continue; }
 
         // Show first 5 alive entities for debug
         if (shownAlive < 5) {
-            DBG(IM_COL32(200,200,255,255), "alive idx:%d hp:%d team:%d", i, health, team);
+            DBG(IM_COL32(200,200,255,255), "idx:%d hp:%d t:%d", i, health, team);
             shownAlive++;
         }
 
-        // Only skip confirmed same-team, accept everything else
-        if (localTeam > 0 && team == localTeam) { teamSkip++; continue; }
+        // NOTE: Team filtering temporarily disabled - OFFSET_TEAM needs re-verification
+        // All alive entities (hp 1-100) that are not localPawn are rendered
 
         uintptr_t sn = reader.readAbsolute<uintptr_t>(ptr + CS2::OFFSET_GAME_SCENE_NODE);
         if (!sn) { boneFail++; continue; }
@@ -95,10 +89,8 @@ static std::vector<PlayerData> ReadPlayers(
             FILE* f = fopen("cs2_bonedata.txt", "w");
             if (f) {
                 fprintf(f, "bonePtr: 0x%llX\n\n", bonePtr);
-
                 uint8_t raw[480] = {};
                 reader.readRaw(bonePtr, raw, sizeof(raw));
-
                 fprintf(f, "=== 3x4 stride (48 bytes per bone) ===\n");
                 for (int b = 0; b < 10; ++b) {
                     float* fl = reinterpret_cast<float*>(raw + b * 48);
@@ -110,7 +102,6 @@ static std::vector<PlayerData> ReadPlayers(
                     fprintf(f, "  tx=fl[3]:%.3f  ty=fl[7]:%.3f  tz=fl[11]:%.3f\n\n",
                         fl[3], fl[7], fl[11]);
                 }
-
                 fprintf(f, "\n=== 4x4 stride (64 bytes per bone) ===\n");
                 uint8_t raw2[640] = {};
                 reader.readRaw(bonePtr, raw2, sizeof(raw2));
@@ -124,7 +115,6 @@ static std::vector<PlayerData> ReadPlayers(
                     fprintf(f, "  fl[12]:%.3f fl[13]:%.3f fl[14]:%.3f\n\n",
                         fl[12], fl[13], fl[14]);
                 }
-
                 fclose(f);
             }
         }
@@ -142,8 +132,8 @@ static std::vector<PlayerData> ReadPlayers(
         players.push_back(std::move(pd));
     }
 
-    DBG(IM_COL32(255,165,0,255), "chk:%d dead:%d skip:%d bone:%d found:%d",
-        checked, dead, teamSkip, boneFail, (int)players.size());
+    DBG(IM_COL32(255,165,0,255), "chk:%d dead:%d bone:%d found:%d",
+        checked, dead, boneFail, (int)players.size());
     DBG(IM_COL32(100,255,100,255), s_boneLogged ? "BONE LOGGED" : "waiting...");
 
     return players;
@@ -180,41 +170,60 @@ static void RenderFrame(ProcessMemoryReader& reader, float screenW, float screen
     g_dl = ImGui::GetBackgroundDrawList();
 
     try {
-        // FIX: CS2's dwViewMatrix is stored row-major in memory.
-        // GLM reads it as column-major so we must transpose to get the correct matrix.
-        glm::mat4 viewProj  = glm::transpose(reader.readClient<glm::mat4>(CS2::dwViewMatrix));
+        // CS2 view matrix is row-major in memory, GLM is column-major - must transpose
+        glm::mat4 viewProj = glm::transpose(reader.readClient<glm::mat4>(CS2::dwViewMatrix));
 
         uintptr_t localPawn = reader.readClient<uintptr_t>(CS2::dwLocalPlayerPawn);
 
-        // FIX: Read local team as int32_t to match OFFSET_TEAM fix
-        int localTeam = localPawn
-            ? reader.readAbsolute<int32_t>(localPawn + CS2::OFFSET_TEAM) : 0;
-
         g_dl->AddText({ 10.f, 10.f }, IM_COL32(0,255,0,255), "CS2 Overlay Active");
-        g_dl->AddText({ 10.f, 26.f }, IM_COL32(200,200,200,255),
-            ("Team:" + std::to_string(localTeam)).c_str());
 
-        auto players = ReadPlayers(reader, localPawn, localTeam, viewProj, screenW, screenH);
+        auto players = ReadPlayers(reader, localPawn, viewProj, screenW, screenH);
 
         g_dl->AddText({ 10.f, 44.f }, IM_COL32(200,200,200,255),
             ("Enemies: " + std::to_string(players.size())).c_str());
 
         for (const auto& player : players) {
+            int onScreen = 0;
+
+            // Draw all bone dots
             for (const auto& bone : player.bones) {
                 if (!bone.screenPos.has_value()) continue;
                 float bx = bone.screenPos->x;
                 float by = bone.screenPos->y;
                 if (bx < 0 || bx > screenW || by < 0 || by > screenH) continue;
-                g_dl->AddCircleFilled({ bx, by }, 3.f, IM_COL32(255,255,0,255));
-                g_dl->AddText({ bx + 4.f, by - 6.f },
-                    IM_COL32(255,255,255,255), bone.name.c_str());
+                onScreen++;
+                // Larger dots (6px) so they are clearly visible
+                g_dl->AddCircleFilled({ bx, by }, 6.f, IM_COL32(255, 255, 0, 255));
             }
-            if (!player.bones.empty() && player.bones[0].screenPos.has_value()) {
-                auto& sp = *player.bones[0].screenPos;
-                g_dl->AddText({ sp.x - 10.f, sp.y - 18.f },
-                    IM_COL32(255,100,100,255),
+
+            // Draw skeleton lines
+            DrawStickFigureOverlay(player.bones, player.boneIndex);
+
+            // Draw bounding box around all on-screen bones
+            DrawSkeletonBoundingBox(player.bones,
+                IM_COL32(255, 50, 50, 220), 2.0f);
+
+            // Draw hp label above bounding box using head bone (index 6)
+            // Fall back to first on-screen bone if head not available
+            std::optional<glm::vec2> labelPos;
+            if (player.boneIndex.count("head")) {
+                int hi = player.boneIndex.at("head");
+                if (hi < (int)player.bones.size() && player.bones[hi].screenPos.has_value())
+                    labelPos = player.bones[hi].screenPos;
+            }
+            if (!labelPos) {
+                for (const auto& bone : player.bones) {
+                    if (bone.screenPos.has_value()) { labelPos = bone.screenPos; break; }
+                }
+            }
+            if (labelPos) {
+                g_dl->AddText(
+                    { labelPos->x - 10.f, labelPos->y - 20.f },
+                    IM_COL32(255, 100, 100, 255),
                     (std::to_string(player.health) + "hp").c_str());
             }
+
+            DBG(IM_COL32(180,255,180,255), "hp:%d bones_on:%d", player.health, onScreen);
         }
 
     } catch (const std::exception& e) {
